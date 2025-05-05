@@ -5,7 +5,6 @@ import re
 
 # import subprocess
 from abc import ABC, abstractmethod
-from playwright._impl._errors import Error
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
@@ -225,11 +224,11 @@ async def run(KW, domain, se, n_pages, progress):
     async with async_playwright() as playwright:
         browser = await playwright.firefox.launch(headless=True)
         bs = AVAILABLE_SEARCH_ENGINES[se](browser)
-        try:
-            response = await bs.scrape(KW, domain, progress, n_pages)
-        except Error as e:
-            # st.error("网络错误。请重试 | Network error. Please retry")
-            st.error(e)
+        # try:
+        response = await bs.scrape(KW, domain, progress, n_pages)
+        # except Error as e:
+        #     # st.error("网络错误。请重试 | Network error. Please retry")
+        #     st.error(e)
         await browser.close()
 
         # progress.empty()
