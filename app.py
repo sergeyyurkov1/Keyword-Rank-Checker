@@ -231,6 +231,7 @@ async def run(KW, domain, se, n_pages, progress):
             st.error("网络错误。请重试 | Network error. Please retry")
         await browser.close()
 
+        progress.empty()
         st.stop()
 
         return response
