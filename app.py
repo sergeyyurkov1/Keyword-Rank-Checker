@@ -5,11 +5,12 @@ import re
 
 # import subprocess
 from abc import ABC, abstractmethod
-
+from playwright._impl._errors import Error
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError
+from playwright_stealth import stealth_async
 
 try:
     st.set_page_config(page_title="关键字排名检查器", page_icon=None, layout="centered")
@@ -56,6 +57,80 @@ class Scraper(ABC):
         pass
 
 
+class GoogleScraper(Scraper):
+    base = "https://www.google.com/"
+
+    def __init__(self, browser):
+        self.browser = browser
+
+    async def scrape(
+        self,
+        kw: str,
+        domain: str,
+        progress,
+        n_pages: int = 100,  # Google does not serve more than 1000 results for any query.
+    ) -> tuple[int, list]:
+        page = await self.browser.new_page()
+
+        await stealth_async(page)
+
+        await page.goto(self.base, timeout=60000)
+
+        await page.locator("textarea").first.fill(kw)
+        await page.locator("textarea").first.press("Enter")
+
+        hrefs = []
+        for pn in range(n_pages):
+            progress.progress(
+                calculate_progress(pn + 1, 1, n_pages),
+                text=f"检查第{pn + 1}/{n_pages}页 | Checking page {pn + 1}/{n_pages}...",
+            )
+
+            await page.wait_for_selector("a:has(h3)", timeout=60000)
+
+            # Find all <a> tags that contain <h3> tags using Playwright
+            a_tags = await page.locator("a:has(h3)").all()
+
+            for a_tag in a_tags:
+                href = await a_tag.get_attribute("href")
+                text = await a_tag.text_content()
+
+                if href:
+                    hrefs.append({"标题": text, "URL": href})
+
+                    if domain in href:
+                        # Add CSS to highlight the element
+                        parent = a_tag
+                        for _ in range(8):  # include N surrounding elements
+                            parent = parent.locator(
+                                ".."
+                            )  # ".." selects the parent element
+                        await parent.evaluate("""element => {
+                            element.style.border = '4px solid red';
+                            element.style.boxShadow = '0 0 8px rgba(255, 0, 0, 0.5)';
+                        }""")
+
+                        await page.screenshot(path="response.png", full_page=True)
+
+                        return len(hrefs), hrefs
+
+            # Go to next page
+            try:
+                # Wait for element to be ready
+                next_button = page.locator("a#pnnext")
+
+                # Scroll into view
+                await next_button.scroll_into_view_if_needed()
+
+                # Click with retries
+                await next_button.dispatch_event("click")
+            except TimeoutError:  # End of results
+                print("End of results")
+                break
+
+        return 0, hrefs
+
+
 class BaiduScraper(Scraper):
     base = "https://www.baidu.com/"
 
@@ -63,8 +138,8 @@ class BaiduScraper(Scraper):
         self.browser = browser
 
     async def scrape(
-        self, kw: str, kw_url: str, progress, n_pages: int = 100
-    ) -> tuple[int, list] | None:
+        self, kw: str, domain: str, progress, n_pages: int = 100
+    ) -> tuple[int, list]:
         page = await self.browser.new_page()
 
         await page.goto(self.base)
@@ -87,8 +162,8 @@ class BaiduScraper(Scraper):
 
             await p.goto(url)
 
+            # End of results
             soup = BeautifulSoup(await p.content(), "html.parser")
-
             if pn > 0:
                 # Find all <strong> > <span> where class starts with "page-item"
                 matching_spans = soup.select('strong > span[class^="page-item"]')
@@ -98,23 +173,25 @@ class BaiduScraper(Scraper):
                 )
 
                 if has_text_1:
+                    print("End of results")
                     break
 
             # Find all <a> tags that contain <em> tags using Playwright
-            a_tags_with_em = await page.locator("a:has(em)").all()
+            a_tags = await page.locator("a:has(em)").all()
 
-            for a_tag in a_tags_with_em:
+            for a_tag in a_tags:
                 href = await a_tag.get_attribute("href")
+                text = await a_tag.text_content()
 
                 try:
                     response = requests.get(href, allow_redirects=True)
                     final_url = response.url
                     response.close()
-                    hrefs.append(final_url)
-                    if kw_url in final_url:
+                    hrefs.append({"标题": text, "URL": final_url})
+                    if domain in final_url:
                         # Add CSS to highlight the element
                         parent = a_tag
-                        for _ in range(5):
+                        for _ in range(5):  # include N surrounding elements
                             parent = parent.locator(
                                 ".."
                             )  # ".." selects the parent element
@@ -128,25 +205,30 @@ class BaiduScraper(Scraper):
                         return len(hrefs), hrefs
                 except requests.exceptions.ConnectionError as e:
                     print(e)
-                    hrefs.append(href)
+                    hrefs.append({"标题": text, "URL": href})
                 except requests.exceptions.MissingSchema as e:
                     print(e)
-                    hrefs.append(href)
+                    hrefs.append({"标题": text, "URL": href})
 
             pn = pn + 10
+
+        return 0, hrefs
 
 
 AVAILABLE_SEARCH_ENGINES = {
     "百度": BaiduScraper,
-    # "谷歌": GoogleScraper,
+    "谷歌": GoogleScraper,
 }
 
 
-async def run(KW, KW_URL, se, n_pages, progress):
+async def run(KW, domain, se, n_pages, progress):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.firefox.launch(headless=True)
         bs = AVAILABLE_SEARCH_ENGINES[se](browser)
-        response = await bs.scrape(KW, KW_URL, progress, n_pages)
+        try:
+            response = await bs.scrape(KW, domain, progress, n_pages)
+        except Error:
+            st.error("网络错误。请重试 | Network error. Please retry")
         await browser.close()
 
         return response
@@ -160,9 +242,9 @@ if __name__ == "__main__":
 
     st.logo("logo_hover.webp")
 
-    response = False
+    response = None
 
-    with st.form("krc"):
+    with st.form("krc", enter_to_submit=False):
         col1, col2 = st.columns([3, 2])
         with col1:
             se = st.radio(
@@ -222,11 +304,14 @@ if __name__ == "__main__":
 
             progress.empty()
 
-    if response:
+    if response and response[0] > 0:
         st.balloons()
         st.metric(label="域名排名 | Domain rank", value=response[0], border=True)
         st.image("response.png")
-    elif response is None:
+    elif response and response[0] == 0:
         st.warning(
-            f"在前{n_pages}页中找不到域名 | Domain not found in the first {n_pages} pages"
+            f"在前{n_pages}页中找不到域名 | Domain not found in the first {n_pages} page(s)"
         )
+
+        data = [{**{"排名": i + 1}, **item} for i, item in enumerate(response[1])]
+        st.dataframe(data, height=300)
