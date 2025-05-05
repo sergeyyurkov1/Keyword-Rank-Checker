@@ -227,12 +227,13 @@ async def run(KW, domain, se, n_pages, progress):
         bs = AVAILABLE_SEARCH_ENGINES[se](browser)
         try:
             response = await bs.scrape(KW, domain, progress, n_pages)
-        except Error:
-            st.error("网络错误。请重试 | Network error. Please retry")
+        except Error as e:
+            # st.error("网络错误。请重试 | Network error. Please retry")
+            st.error(e)
         await browser.close()
 
-        progress.empty()
-        st.stop()
+        # progress.empty()
+        # st.stop()
 
         return response
 
